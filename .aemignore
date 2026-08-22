@@ -1,0 +1,7 @@
+.github/
+dist/
+scripts/
+tests/
+.gitignore
+CHANGELOG.md
+README.md
