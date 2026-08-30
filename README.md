@@ -22,18 +22,24 @@ sprite tags.
 - Ignores Soupmasters metadata tags whose names start with `-`, `*`, `//`, or
   `'`.
 
-## Install with Aseprite Extension Manager
+## Recommended installation
+
+Install this extension with
+[Aseprite Extension Manager](https://github.com/soupmasters/AsepriteExtensionManager).
+This is the recommended method because the manager can install the extension
+directly from its Git repository and find future updates.
 
 1. Open **Aseprite Extension Manager...** in Aseprite.
 2. Choose **Install from GitHub**.
-3. Enter `https://github.com/soupmasters/AsepriteAnimationList`.
+3. Paste `https://github.com/soupmasters/AnimationListForAseprite.git`.
 4. Confirm Aseprite's native extension installation prompt.
 
 The repository has one Aseprite manifest at its root, and releases attach a
 single asset named `AsepriteAnimationList.aseprite-extension`. Keeping that
 asset name stable allows the Extension Manager to find future updates.
 
-You can also install the release asset directly from Aseprite's Extensions
+Alternatively, download `AsepriteAnimationList.aseprite-extension` from this
+repository's releases and install it directly from Aseprite's Extensions
 preferences with **Add Extension**.
 
 ## Development
