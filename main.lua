@@ -7,7 +7,19 @@ local hiddenPrefixes = {
   "'",
 }
 
+local DEFAULT_DIALOG_WIDTH = 260
 local activeDialog = nil
+local dialogSessionActive = false
+local suppressDialogClose = false
+local rebuildingDialog = false
+local displayedSprite = nil
+local displayedTagSnapshot = {}
+local observedSprite = nil
+local spriteListener = nil
+local appEventSource = nil
+local appListeners = {}
+local refreshTimer = nil
+local lastDialogBounds = nil
 local testHost = nil
 
 local function currentApp()
@@ -26,25 +38,6 @@ end
 
 local function startsWith(value, prefix)
   return value:sub(1, #prefix) == prefix
-end
-
-local function frameNumber(frame)
-  if type(frame) == "number" then
-    return frame
-  end
-  if frame ~= nil then
-    return frame.frameNumber
-  end
-  return nil
-end
-
-local function tagButtonText(tag)
-  local first = frameNumber(tag.fromFrame)
-  local last = frameNumber(tag.toFrame)
-  if first ~= nil and last ~= nil then
-    return string.format("%s  (%d-%d)", tag.name, first, last)
-  end
-  return tag.name
 end
 
 function AnimationList.isAnimationName(name)
@@ -75,12 +68,375 @@ function AnimationList.collectTags(sprite)
   return result
 end
 
+local function snapshotTags(tags)
+  local snapshot = {}
+  for index, tag in ipairs(tags) do
+    snapshot[index] = {
+      tag = tag,
+      name = tag.name,
+    }
+  end
+  return snapshot
+end
+
+local function snapshotsEqual(left, right)
+  if #left ~= #right then
+    return false
+  end
+  for index = 1, #left do
+    if left[index].tag ~= right[index].tag or left[index].name ~= right[index].name then
+      return false
+    end
+  end
+  return true
+end
+
+local function sameTagStructure(left, right)
+  if #left ~= #right then
+    return false
+  end
+  for index = 1, #left do
+    if left[index].tag ~= right[index].tag then
+      return false
+    end
+  end
+  return true
+end
+
+local function readDialogBounds(dialog)
+  if dialog == nil then
+    return nil
+  end
+
+  local ok, bounds = pcall(function()
+    return dialog.bounds
+  end)
+  if not ok or bounds == nil then
+    return nil
+  end
+
+  local x = tonumber(bounds.x)
+  local y = tonumber(bounds.y)
+  local width = tonumber(bounds.width)
+  local height = tonumber(bounds.height)
+  if x == nil or y == nil or width == nil or height == nil then
+    return nil
+  end
+
+  return {
+    x = x,
+    y = y,
+    width = width,
+    height = height,
+  }
+end
+
+local function rectangle(bounds)
+  if testHost ~= nil then
+    return {
+      x = bounds.x,
+      y = bounds.y,
+      width = bounds.width,
+      height = bounds.height,
+    }
+  end
+  return Rectangle(bounds.x, bounds.y, bounds.width, bounds.height)
+end
+
+local function showDialog(dialog, previousBounds)
+  dialog:show {
+    wait = false,
+    autoscrollbars = true,
+  }
+
+  local currentBounds = readDialogBounds(dialog)
+  if currentBounds == nil then
+    return
+  end
+
+  local targetBounds = previousBounds or currentBounds
+  if previousBounds == nil then
+    local width = math.max(targetBounds.width + 48, DEFAULT_DIALOG_WIDTH)
+    targetBounds.x = targetBounds.x - math.floor((width - targetBounds.width) / 2)
+    targetBounds.width = width
+  end
+
+  pcall(function()
+    dialog.bounds = rectangle(targetBounds)
+  end)
+end
+
+local refreshIfChanged
+
+local function createTimer(options)
+  if testHost ~= nil and testHost.createTimer ~= nil then
+    return testHost.createTimer(options)
+  end
+  return Timer(options)
+end
+
+local function stopRefreshTimer()
+  local timer = refreshTimer
+  refreshTimer = nil
+  if timer ~= nil then
+    pcall(function()
+      timer:stop()
+    end)
+  end
+end
+
+local function detachSpriteListener()
+  if observedSprite ~= nil and spriteListener ~= nil then
+    local sprite = observedSprite
+    local listener = spriteListener
+    pcall(function()
+      if sprite.events ~= nil then
+        sprite.events:off(listener)
+      end
+    end)
+  end
+  observedSprite = nil
+  spriteListener = nil
+end
+
+local function scheduleRefresh()
+  if not dialogSessionActive or rebuildingDialog or refreshTimer ~= nil then
+    return
+  end
+
+  local timer
+  timer = createTimer {
+    interval = 0.05,
+    ontick = function()
+      if refreshTimer ~= timer then
+        return
+      end
+      timer:stop()
+      refreshTimer = nil
+      refreshIfChanged()
+    end,
+  }
+  refreshTimer = timer
+  timer:start()
+end
+
+local function onSpriteChange()
+  scheduleRefresh()
+end
+
+local function observeSprite(sprite)
+  if observedSprite == sprite then
+    return
+  end
+
+  detachSpriteListener()
+  observedSprite = sprite
+  if observedSprite == nil then
+    return
+  end
+
+  local ok, listener = pcall(function()
+    if observedSprite.events == nil then
+      return nil
+    end
+    return observedSprite.events:on("change", onSpriteChange)
+  end)
+  if ok and listener ~= nil then
+    spriteListener = listener
+  end
+end
+
+local function onBeforeSiteChange()
+  detachSpriteListener()
+  scheduleRefresh()
+end
+
+local function onSiteChange()
+  observeSprite(currentApp().sprite)
+  scheduleRefresh()
+end
+
+local function detachAppListeners()
+  for _, listener in ipairs(appListeners) do
+    pcall(function()
+      listener.events:off(listener.code)
+    end)
+  end
+  appListeners = {}
+  appEventSource = nil
+end
+
+local function attachAppListeners()
+  local aseprite = currentApp()
+  if appEventSource == aseprite and #appListeners > 0 then
+    return
+  end
+
+  detachAppListeners()
+  appEventSource = aseprite
+  if aseprite.events == nil then
+    return
+  end
+
+  for _, event in ipairs({
+    { name = "beforesitechange", callback = onBeforeSiteChange },
+    { name = "sitechange", callback = onSiteChange },
+  }) do
+    local ok, listener = pcall(function()
+      return aseprite.events:on(event.name, event.callback)
+    end)
+    if ok and listener ~= nil then
+      appListeners[#appListeners + 1] = {
+        events = aseprite.events,
+        code = listener,
+      }
+    end
+  end
+end
+
+local function deactivateSession()
+  dialogSessionActive = false
+  stopRefreshTimer()
+  detachSpriteListener()
+  detachAppListeners()
+  displayedSprite = nil
+  displayedTagSnapshot = {}
+  lastDialogBounds = nil
+end
+
+local function closeActiveDialog()
+  local dialog = activeDialog
+  activeDialog = nil
+  if dialog == nil then
+    return
+  end
+
+  suppressDialogClose = true
+  pcall(function()
+    dialog:close()
+  end)
+  suppressDialogClose = false
+end
+
+local function rebuildDialog(sprite, tags, snapshot)
+  if rebuildingDialog then
+    return false
+  end
+
+  rebuildingDialog = true
+  local previousBounds = readDialogBounds(activeDialog) or lastDialogBounds
+  if previousBounds ~= nil then
+    lastDialogBounds = previousBounds
+  end
+  closeActiveDialog()
+  displayedSprite = sprite
+  displayedTagSnapshot = snapshot
+
+  if sprite == nil or #tags == 0 then
+    rebuildingDialog = false
+    return false
+  end
+
+  local dialog
+  dialog = createDialog {
+    title = "Animation List",
+    resizeable = true,
+    onclose = function()
+      if activeDialog == dialog then
+        activeDialog = nil
+      end
+      if not suppressDialogClose then
+        deactivateSession()
+      end
+    end,
+  }
+  if dialog == nil then
+    displayedSprite = nil
+    displayedTagSnapshot = {}
+    rebuildingDialog = false
+    return false
+  end
+
+  for index, tag in ipairs(tags) do
+    if index > 1 then
+      dialog:newrow()
+    end
+    dialog:button {
+      id = "tag_" .. index,
+      text = tag.name,
+      hexpand = true,
+      onclick = function()
+        AnimationList.jumpToTag(sprite, tag)
+      end,
+    }
+  end
+
+  activeDialog = dialog
+  showDialog(dialog, previousBounds)
+  lastDialogBounds = readDialogBounds(dialog) or previousBounds
+  rebuildingDialog = false
+  return true
+end
+
+local function updateButtonNames(snapshot)
+  if activeDialog == nil or type(activeDialog.modify) ~= "function" then
+    return false
+  end
+
+  local previousBounds = readDialogBounds(activeDialog)
+  for index, entry in ipairs(snapshot) do
+    if displayedTagSnapshot[index].name ~= entry.name then
+      local ok = pcall(function()
+        activeDialog:modify {
+          id = "tag_" .. index,
+          text = entry.name,
+        }
+      end)
+      if not ok then
+        return false
+      end
+    end
+  end
+
+  displayedTagSnapshot = snapshot
+  if previousBounds ~= nil then
+    pcall(function()
+      activeDialog.bounds = rectangle(previousBounds)
+    end)
+    lastDialogBounds = readDialogBounds(activeDialog) or previousBounds
+  end
+  return true
+end
+
+refreshIfChanged = function()
+  if not dialogSessionActive or rebuildingDialog then
+    return false
+  end
+
+  local aseprite = currentApp()
+  local sprite = aseprite.sprite
+  observeSprite(sprite)
+  local tags = AnimationList.collectTags(sprite)
+  local snapshot = snapshotTags(tags)
+  if sprite == displayedSprite and snapshotsEqual(snapshot, displayedTagSnapshot) then
+    return false
+  end
+
+  if sprite == displayedSprite and sameTagStructure(snapshot, displayedTagSnapshot) then
+    if updateButtonNames(snapshot) then
+      return true
+    end
+  end
+
+  return rebuildDialog(sprite, tags, snapshot)
+end
+
 function AnimationList.jumpToTag(sprite, tag)
   local aseprite = currentApp()
   if aseprite.sprite ~= sprite then
     aseprite.alert {
       title = "Animation List",
-      text = "The active sprite changed. Refresh the Animation List and try again.",
+      text = "The active sprite changed. Reopen the Animation List and try again.",
     }
     return false
   end
@@ -95,7 +451,7 @@ function AnimationList.jumpToTag(sprite, tag)
   if not ok or target == nil then
     aseprite.alert {
       title = "Animation List",
-      text = "That tag no longer exists. Refresh the Animation List and try again.",
+      text = "That tag no longer exists. Reopen the Animation List and try again.",
     }
     return false
   end
@@ -109,13 +465,8 @@ function AnimationList.jumpToTag(sprite, tag)
 end
 
 function AnimationList.close()
-  local dialog = activeDialog
-  activeDialog = nil
-  if dialog ~= nil then
-    pcall(function()
-      dialog:close()
-    end)
-  end
+  deactivateSession()
+  closeActiveDialog()
 end
 
 function AnimationList.open()
@@ -133,63 +484,15 @@ function AnimationList.open()
     return false
   end
 
-  AnimationList.close()
-
-  local dialog
-  dialog = createDialog {
-    title = "Animation List",
-    resizeable = true,
-    onclose = function()
-      if activeDialog == dialog then
-        activeDialog = nil
-      end
-    end,
-  }
-  if dialog == nil then
-    return false
-  end
-
   local tags = AnimationList.collectTags(sprite)
-  if #tags == 0 then
-    dialog:label {
-      id = "empty",
-      text = "No animation tags found.",
-    }
-    dialog:newrow()
-  else
-    for index, tag in ipairs(tags) do
-      dialog:button {
-        id = "tag_" .. index,
-        text = tagButtonText(tag),
-        hexpand = true,
-        onclick = function()
-          AnimationList.jumpToTag(sprite, tag)
-        end,
-      }
-      dialog:newrow()
-    end
+  if not dialogSessionActive then
+    lastDialogBounds = nil
   end
-
-  dialog:separator()
-  dialog:button {
-    id = "refresh",
-    text = "Refresh",
-    onclick = function()
-      AnimationList.open()
-    end,
-  }
-  dialog:button {
-    id = "close",
-    text = "Close",
-  }
-
-  activeDialog = dialog
-  local showOptions = {
-    wait = false,
-    autoscrollbars = true,
-  }
-  dialog:show(showOptions)
-  return true
+  dialogSessionActive = true
+  stopRefreshTimer()
+  attachAppListeners()
+  observeSprite(sprite)
+  return rebuildDialog(sprite, tags, snapshotTags(tags))
 end
 
 function AnimationList._setHostForTests(host)

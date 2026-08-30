@@ -1,7 +1,10 @@
+![Animation List Plugin banner](assets/animation-list-banner.png)
+
 # Aseprite Animation List
 
 Aseprite Animation List is a small Lua extension that displays animation tags
-in a compact dialog and jumps to the first frame of a tag with one click.
+as a vertical list of buttons and jumps to the first frame of a tag with one
+click.
 
 This is a clean rewrite inspired by Soupmasters' original internal Animation
 List script. It fixes the old package's empty script and plugin-registration
@@ -12,8 +15,9 @@ sprite tags.
 
 - Opens from **File > Scripts > Animation List...**.
 - Uses `Shift+Alt+E` as the default shortcut.
-- Shows each animation tag together with its frame range.
-- Refreshes the list without closing the workflow.
+- Shows only the animation name on each button.
+- Updates button names and rows when animation tags are renamed, added, or removed.
+- Follows the active sprite while the list is open.
 - Keeps the dialog modeless and scrollable for sprites with many tags.
 - Ignores Soupmasters metadata tags whose names start with `-`, `*`, `//`, or
   `'`.

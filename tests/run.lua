@@ -82,14 +82,8 @@ local function newHost(sprite)
       dialog.widgets[#dialog.widgets + 1] = definition
       return dialog
     end
-    function dialog:label(definition)
-      return addWidget("label", definition)
-    end
     function dialog:button(definition)
       return addWidget("button", definition)
-    end
-    function dialog:separator()
-      return addWidget("separator", {})
     end
     function dialog:newrow(definition)
       return addWidget("newrow", definition or {})
@@ -173,9 +167,13 @@ test("opens one button per animation tag and jumps safely", function()
   expect(AnimationList.open(), "dialog should open")
   equal(#host.dialogs, 1, "dialog count")
   local dialog = host.dialogs[1]
-  equal(widgetById(dialog, "tag_1").text, "Idle  (1-4)", "first button text")
-  equal(widgetById(dialog, "tag_2").text, "Run  (5-10)", "second button text")
+  equal(widgetById(dialog, "tag_1").text, "Idle", "first button text")
+  equal(widgetById(dialog, "tag_2").text, "Run", "second button text")
   expect(widgetById(dialog, "tag_3") == nil, "metadata tag should not have a button")
+  equal(#dialog.widgets, 3, "button list widget count")
+  equal(dialog.widgets[1].kind, "button", "first widget kind")
+  equal(dialog.widgets[2].kind, "newrow", "row break widget kind")
+  equal(dialog.widgets[3].kind, "button", "last widget kind")
 
   widgetById(dialog, "tag_2").onclick()
   equal(host.app.frame.frameNumber, 5, "selected frame")
@@ -196,19 +194,13 @@ test("rejects stale buttons after the active sprite changes", function()
   expect(host.app.frame == nil, "frame should remain unchanged")
 end)
 
-test("refresh replaces the existing modeless dialog", function()
+test("shows nothing when the sprite has no animation tags", function()
   local sprite = { tags = {} }
-  sprite.tags = { fakeTag("Idle", 1, 4, sprite) }
   local host = newHost(sprite)
   AnimationList._setHostForTests(host)
 
-  AnimationList.open()
-  local first = host.dialogs[1]
-  widgetById(first, "refresh").onclick()
-
-  equal(#host.dialogs, 2, "dialog count after refresh")
-  expect(first.closed, "first dialog should close")
-  expect(host.dialogs[2].showOptions.bounds == nil, "refresh should not reuse dialog bounds")
+  expect(not AnimationList.open(), "dialog should not open")
+  equal(#host.dialogs, 0, "dialog count")
 end)
 
 test("handles missing sprites and extension shutdown", function()
@@ -218,6 +210,7 @@ test("handles missing sprites and extension shutdown", function()
   equal(#host.app.alertCalls, 1, "missing-sprite alert count")
 
   local sprite = { tags = {} }
+  sprite.tags = { fakeTag("Idle", 1, 4, sprite) }
   host.app.sprite = sprite
   AnimationList.open()
   local dialog = host.dialogs[1]
